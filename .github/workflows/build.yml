@@ -31,16 +31,14 @@ jobs:
       - name: Configure for JCOW407
         run: |
           cd openwrt
-          cat > .config << 'ENDCONFIG'
-CONFIG_TARGET_econet=y
-CONFIG_TARGET_econet_en7528=y
-CONFIG_TARGET_econet_en7528_DEVICE_jiofiber_jcow407=y
-CONFIG_PACKAGE_ca-bundle=y
-CONFIG_PACKAGE_openssl-util=y
-CONFIG_PACKAGE_curl=y
-CONFIG_PACKAGE_luci=y
-CONFIG_PACKAGE_luci-ssl=y
-ENDCONFIG
+          echo 'CONFIG_TARGET_econet=y' > .config
+          echo 'CONFIG_TARGET_econet_en7528=y' >> .config
+          echo 'CONFIG_TARGET_econet_en7528_DEVICE_jiofiber_jcow407=y' >> .config
+          echo 'CONFIG_PACKAGE_ca-bundle=y' >> .config
+          echo 'CONFIG_PACKAGE_openssl-util=y' >> .config
+          echo 'CONFIG_PACKAGE_curl=y' >> .config
+          echo 'CONFIG_PACKAGE_luci=y' >> .config
+          echo 'CONFIG_PACKAGE_luci-ssl=y' >> .config
           make defconfig
 
       - name: Build firmware
@@ -52,9 +50,7 @@ ENDCONFIG
         uses: actions/upload-artifact@v4
         with:
           name: jcow407-firmware
-          path: |
-            openwrt/bin/targets/econet/en7528/*factory*.trx
-            openwrt/bin/targets/econet/en7528/*sysupgrade*.bin
+          path: openwrt/bin/targets/econet/en7528/*factory*.trx,openwrt/bin/targets/econet/en7528/*sysupgrade*.bin
           retention-days: 7
 
       - name: Show output
