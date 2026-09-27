@@ -42,14 +42,20 @@ jobs:
           cd openwrt
           make -j$(nproc) V=s 2>&1 | tee build.log
 
+      - name: Find firmware files
+        run: |
+          cd openwrt
+          find . -name "*.trx" -o -name "*factory*.bin" -o -name "*sysupgrade*.bin" | head -20
+          ls -la bin/targets/ 2>/dev/null || echo "no bin/targets"
+
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: jcow407-firmware
-          path: openwrt/bin/targets/econet/en7528/*factory*.trx,openwrt/bin/targets/econet/en7528/*sysupgrade*.bin
+          path: openwrt/bin/targets/**/*
           retention-days: 7
 
       - name: Show output
         run: |
           cd openwrt
-          ls -la bin/targets/econet/en7528/
+          ls -la bin/targets/ 2>/dev/null || echo "no bin/targets"
