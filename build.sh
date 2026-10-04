@@ -25,9 +25,10 @@ CONFIG_PACKAGE_kmod-econet-xpon=y
 CONFIG_PACKAGE_luci-app-econet-xpon=y
 CONFIG_PACKAGE_luci=y
 # LuCI here is the ucode build: /www/cgi-bin/luci is a ucode script, so uhttpd
-# NEEDS uhttpd-mod-ucode. Without it every LuCI request returns 403.
+# NEEDS uhttpd-mod-ucode. Without it the dispatcher never runs.
+# NOTE: this uhttpd has no separate "cgi" module package - only lua/ubus/ucode.
 CONFIG_PACKAGE_uhttpd-mod-ucode=y
-CONFIG_PACKAGE_uhttpd-mod-cgi=y
+CONFIG_PACKAGE_uhttpd-mod-ubus=y
 
 # --- WAN PPPoE over the PON netdev ---
 CONFIG_PACKAGE_ppp=y
@@ -101,7 +102,7 @@ start() {
 		return 0
 	}
 
-	mkdir -p "$STORE/config" "$STORE/dropbear" "$STORE/modules.d"
+	mkdir -p "$STORE/config" "$STORE/dropbear" "$STORE/modules.d" "$STORE/auth"
 
 	# First boot: seed the persistent store from the read-only image defaults.
 	if [ ! -f "$STORE/config/network" ]; then
@@ -115,17 +116,29 @@ start() {
 	if [ ! -f "$STORE/modules.d/90-econet-eth" ] && [ -f /etc/modules.d/90-econet-eth ]; then
 		cp -af /etc/modules.d/. "$STORE/modules.d/" 2>/dev/null
 	fi
+	# /etc/passwd + /etc/shadow also have to persist, otherwise the root
+	# password is lost on every reboot and LuCI login stops working.
+	if [ ! -f "$STORE/auth/passwd" ]; then
+		cp -af /etc/passwd "$STORE/auth/passwd" 2>/dev/null
+	fi
+	if [ ! -f "$STORE/auth/shadow" ]; then
+		cp -af /etc/shadow "$STORE/auth/shadow" 2>/dev/null
+	fi
 
 	if mount --bind "$STORE/config" /etc/config; then
 		logger -t xpon-persist "/etc/config is persistent (ubifs $STORE/config)"
 	fi
 	mount --bind "$STORE/dropbear" /etc/dropbear 2>/dev/null
 	mount --bind "$STORE/modules.d" /etc/modules.d 2>/dev/null
+	mount --bind "$STORE/auth/passwd" /etc/passwd 2>/dev/null
+	mount --bind "$STORE/auth/shadow" /etc/shadow 2>/dev/null
 	sync
 }
 
 stop() {
 	sync
+	umount /etc/passwd 2>/dev/null
+	umount /etc/shadow 2>/dev/null
 	umount /etc/config 2>/dev/null
 	umount /etc/dropbear 2>/dev/null
 	umount /etc/modules.d 2>/dev/null
@@ -145,31 +158,43 @@ rm -f /etc/modules.d/91-econet-xpon
 # 2) Generic ONT: identity left EMPTY so any ISP's serial number / PLOAM
 #    password / WAN MAC can be entered in LuCI -> Services -> ECONET xPON.
 #    Nothing Jio/ISP specific is hardcoded.
-uci -q delete econet-xpon.identity
-uci set econet-xpon.identity=econet-xpon
-uci set econet-xpon.identity.gpon_sn=''
-uci set econet-xpon.identity.gpon_pw=''
-uci set econet-xpon.identity.wan_mac=''
+#    This script runs on EVERY boot, so it must only fill in MISSING values -
+#    otherwise it would wipe the serial the user just entered in LuCI.
+if ! uci -q get econet-xpon.identity >/dev/null; then
+	uci set econet-xpon.identity=econet-xpon
+fi
+if ! uci -q get econet-xpon.identity.gpon_sn >/dev/null; then
+	uci set econet-xpon.identity.gpon_sn=''
+fi
+if ! uci -q get econet-xpon.identity.gpon_pw >/dev/null; then
+	uci set econet-xpon.identity.gpon_pw=''
+fi
+if ! uci -q get econet-xpon.identity.wan_mac >/dev/null; then
+	uci set econet-xpon.identity.wan_mac=''
+fi
 uci commit econet-xpon
 
 # 3) Editable 802.1q VLAN device on the GPON WAN netdev, with PPPoE on top.
 #    The VID, device and PPPoE credentials all stay editable in LuCI.
-uci -q delete network.vlanwan
-uci set network.vlanwan=device
-uci set network.vlanwan.name='ponwan0.1015'
-uci set network.vlanwan.type='8021q'
-uci set network.vlanwan.ifname='ponwan0'
-uci set network.vlanwan.vid='1015'
+if ! uci -q get network.vlanwan >/dev/null; then
+	uci set network.vlanwan=device
+	uci set network.vlanwan.name='ponwan0.1015'
+	uci set network.vlanwan.type='8021q'
+	uci set network.vlanwan.ifname='ponwan0'
+	uci set network.vlanwan.vid='1015'
+fi
 
-uci -q delete network.wan
-uci set network.wan=interface
-uci set network.wan.device='ponwan0.1015'
-uci set network.wan.proto='pppoe'
+if ! uci -q get network.wan >/dev/null; then
+	uci set network.wan=interface
+	uci set network.wan.device='ponwan0.1015'
+	uci set network.wan.proto='pppoe'
+fi
 
-uci -q delete network.wan6
-uci set network.wan6=interface
-uci set network.wan6.device='ponwan0.1015'
-uci set network.wan6.proto='dhcpv6'
+if ! uci -q get network.wan6 >/dev/null; then
+	uci set network.wan6=interface
+	uci set network.wan6.device='ponwan0.1015'
+	uci set network.wan6.proto='dhcpv6'
+fi
 
 uci commit network
 exit 0
@@ -188,9 +213,21 @@ cat > files/etc/uci-defaults/98-luci-fix <<'LEOF'
 uci -q delete uhttpd.main.lua_prefix
 uci commit uhttpd
 
-# Leftover placeholder login section with an invalid hash ("$p$root").
-uci -q delete rpcd.@login[0]
-uci commit rpcd
+# DO NOT delete rpcd.@login[0]. The stock config ships:
+#     config login
+#         option username 'root'
+#         option password '$p$root'
+#         list read '*'
+#         list write '*'
+# Removing that section makes rpcd reject EVERY session login ("Permission
+# denied" from ubus call session login), which locks the user out of the LuCI
+# web UI even though SSH still works. Leave it exactly as shipped.
+
+# The stock image ships root with a BLANK password. Give it a real one on first
+# boot (and only when it is still blank) so LuCI/SSH logins are not open.
+if [ -z "$(awk -F: '$1 == "root" { print $2 }' /etc/shadow)" ]; then
+	printf 'Shezan@4321\nShezan@4321\n' | passwd root >/dev/null 2>&1
+fi
 
 exit 0
 LEOF
