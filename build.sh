@@ -24,6 +24,10 @@ CONFIG_IMAGEOPT=y
 CONFIG_PACKAGE_kmod-econet-xpon=y
 CONFIG_PACKAGE_luci-app-econet-xpon=y
 CONFIG_PACKAGE_luci=y
+# LuCI here is the ucode build: /www/cgi-bin/luci is a ucode script, so uhttpd
+# NEEDS uhttpd-mod-ucode. Without it every LuCI request returns 403.
+CONFIG_PACKAGE_uhttpd-mod-ucode=y
+CONFIG_PACKAGE_uhttpd-mod-cgi=y
 
 # --- WAN PPPoE over the PON netdev ---
 CONFIG_PACKAGE_ppp=y
@@ -171,6 +175,26 @@ uci commit network
 exit 0
 XEOF
 chmod +x files/etc/uci-defaults/99-xpon-setup
+
+# LuCI web UI repair.
+cat > files/etc/uci-defaults/98-luci-fix <<'LEOF'
+#!/bin/sh
+# The stock uhttpd config ships a Lua handler prefix for the old Lua LuCI:
+#   list lua_prefix '/cgi-bin/luci=/usr/lib/lua/luci/sgi/uhttpd.lua'
+# This image has the ucode LuCI and no uhttpd Lua module, so that prefix
+# pointed /cgi-bin/luci at a file that does not exist and every single LuCI
+# request came back 403 Forbidden (the web UI was unusable). Drop it - uhttpd
+# then serves /www/cgi-bin/luci (the ucode dispatcher) itself.
+uci -q delete uhttpd.main.lua_prefix
+uci commit uhttpd
+
+# Leftover placeholder login section with an invalid hash ("$p$root").
+uci -q delete rpcd.@login[0]
+uci commit rpcd
+
+exit 0
+LEOF
+chmod +x files/etc/uci-defaults/98-luci-fix
 
 make defconfig
 make "-j$(nproc)" V=s 2>&1 | tee build.log
