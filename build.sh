@@ -97,7 +97,7 @@ start() {
 		return 0
 	}
 
-	mkdir -p "$STORE/config" "$STORE/dropbear"
+	mkdir -p "$STORE/config" "$STORE/dropbear" "$STORE/modules.d"
 
 	# First boot: seed the persistent store from the read-only image defaults.
 	if [ ! -f "$STORE/config/network" ]; then
@@ -108,11 +108,15 @@ start() {
 	   [ -f /etc/dropbear/dropbear_ed25519_host_key ]; then
 		cp -af /etc/dropbear/. "$STORE/dropbear/" 2>/dev/null
 	fi
+	if [ ! -f "$STORE/modules.d/90-econet-eth" ] && [ -f /etc/modules.d/90-econet-eth ]; then
+		cp -af /etc/modules.d/. "$STORE/modules.d/" 2>/dev/null
+	fi
 
 	if mount --bind "$STORE/config" /etc/config; then
 		logger -t xpon-persist "/etc/config is persistent (ubifs $STORE/config)"
 	fi
 	mount --bind "$STORE/dropbear" /etc/dropbear 2>/dev/null
+	mount --bind "$STORE/modules.d" /etc/modules.d 2>/dev/null
 	sync
 }
 
@@ -120,6 +124,7 @@ stop() {
 	sync
 	umount /etc/config 2>/dev/null
 	umount /etc/dropbear 2>/dev/null
+	umount /etc/modules.d 2>/dev/null
 }
 INITEOF
 chmod +x files/etc/init.d/xpon-persist
