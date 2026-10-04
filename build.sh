@@ -39,6 +39,7 @@ CONFIG_PACKAGE_kmod-usb-storage=y
 CONFIG_PACKAGE_kmod-fs-ext4=y
 CONFIG_PACKAGE_kmod-fs-vfat=y
 CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_kmod-8021q=y
 CONFIG_PACKAGE_wpad-basic-mbedtls=y
 EOF
 
@@ -54,6 +55,117 @@ uci commit network
 exit 0
 UCIEOF
 chmod +x files/etc/uci-defaults/99-tr069
+
+# ---------------------------------------------------------------------------
+# Persistent configuration.
+#
+# This image boots as squashfs with an overlayfs-on-tmpfs, so EVERY uci/LuCI
+# change is lost on reboot. There is a persistent UBIFS volume on the NAND
+# ("config_data", /dev/ubi0_0) - it currently holds the stock Jio/TR-069 files.
+# We mount it early and bind-mount our own subdirectory over /etc/config (and
+# /etc/dropbear), so configuration survives reboots and the SSH host key stays
+# stable. Stock files in that volume are left untouched.
+# ---------------------------------------------------------------------------
+mkdir -p files/etc/init.d
+cat > files/etc/init.d/xpon-persist <<'INITEOF'
+#!/bin/sh /etc/rc.common
+
+START=09
+STOP=89
+
+XCFG=/mnt/xponcfg
+STORE="$XCFG/openwrt"
+
+wait_for_ubi() {
+	local i=0
+	while [ $i -lt 30 ]; do
+		[ -e /dev/ubi0_0 ] && return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+start() {
+	mkdir -p "$XCFG"
+	wait_for_ubi || {
+		logger -t xpon-persist "no /dev/ubi0_0, config will NOT persist"
+		return 0
+	}
+	grep -q " $XCFG " /proc/mounts || mount -t ubifs /dev/ubi0_0 "$XCFG" || {
+		logger -t xpon-persist "ubifs mount failed, config will NOT persist"
+		return 0
+	}
+
+	mkdir -p "$STORE/config" "$STORE/dropbear"
+
+	# First boot: seed the persistent store from the read-only image defaults.
+	if [ ! -f "$STORE/config/network" ]; then
+		cp -af /etc/config/. "$STORE/config/" 2>/dev/null
+		logger -t xpon-persist "seeded persistent config from image defaults"
+	fi
+	if [ ! -f "$STORE/dropbear/dropbear_ed25519_host_key" ] &&
+	   [ -f /etc/dropbear/dropbear_ed25519_host_key ]; then
+		cp -af /etc/dropbear/. "$STORE/dropbear/" 2>/dev/null
+	fi
+
+	if mount --bind "$STORE/config" /etc/config; then
+		logger -t xpon-persist "/etc/config is persistent (ubifs $STORE/config)"
+	fi
+	mount --bind "$STORE/dropbear" /etc/dropbear 2>/dev/null
+	sync
+}
+
+stop() {
+	sync
+	umount /etc/config 2>/dev/null
+	umount /etc/dropbear 2>/dev/null
+}
+INITEOF
+chmod +x files/etc/init.d/xpon-persist
+
+# Generic GPON ONT defaults + editable VLAN/PPPoE WAN.
+cat > files/etc/uci-defaults/99-xpon-setup <<'XEOF'
+#!/bin/sh
+# 1) /etc/modules.d/91-econet-xpon autoloads the driver with NO identity, then
+#    /etc/init.d/econet-xpon rmmod+insmods it WITH the identity. The second
+#    registration collides on /proc entries and oopses on every boot, so let the
+#    init script be the only thing that loads the module.
+rm -f /etc/modules.d/91-econet-xpon
+
+# 2) Generic ONT: identity left EMPTY so any ISP's serial number / PLOAM
+#    password / WAN MAC can be entered in LuCI -> Services -> ECONET xPON.
+#    Nothing Jio/ISP specific is hardcoded.
+uci -q delete econet-xpon.identity
+uci set econet-xpon.identity=econet-xpon
+uci set econet-xpon.identity.gpon_sn=''
+uci set econet-xpon.identity.gpon_pw=''
+uci set econet-xpon.identity.wan_mac=''
+uci commit econet-xpon
+
+# 3) Editable 802.1q VLAN device on the GPON WAN netdev, with PPPoE on top.
+#    The VID, device and PPPoE credentials all stay editable in LuCI.
+uci -q delete network.vlanwan
+uci set network.vlanwan=device
+uci set network.vlanwan.name='ponwan0.1015'
+uci set network.vlanwan.type='8021q'
+uci set network.vlanwan.ifname='ponwan0'
+uci set network.vlanwan.vid='1015'
+
+uci -q delete network.wan
+uci set network.wan=interface
+uci set network.wan.device='ponwan0.1015'
+uci set network.wan.proto='pppoe'
+
+uci -q delete network.wan6
+uci set network.wan6=interface
+uci set network.wan6.device='ponwan0.1015'
+uci set network.wan6.proto='dhcpv6'
+
+uci commit network
+exit 0
+XEOF
+chmod +x files/etc/uci-defaults/99-xpon-setup
 
 make defconfig
 make "-j$(nproc)" V=s 2>&1 | tee build.log
